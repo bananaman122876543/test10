@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="en-us">
+
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+  <title>play.unity.com game</title>
+</head>
+
+<body>
+  <div id="unity-container" class="unity-desktop">
+    <canvas id="unity-canvas" width=960 height=600 tabindex="-1"></canvas>
+  </div>
+  <style>
+    body,
+    html {
+      margin: 0;
+      overflow: hidden;
+    }
+
+    canvas {
+      width: 100vw !important;
+      height: 100vh !important;
+    }
+  </style>
+
+  <script>
+    // Ensure that sensitive query parameters are not available to the game runtime
+    const _url = new URL(window.location.href);
+    _url.searchParams.delete('access_token');
+    _url.searchParams.delete('password');
+    _url.searchParams.delete('ticket');
+    window.history.replaceState(null, null, _url.toString());
+  </script>
+
+  <script>
+    const container = document.querySelector("#unity-container");
+    const canvas = document.querySelector("#unity-canvas");
+  </script>
+
+  <script>
+    // Hacky solution for managing audio volume of the game player dynamically
+    window.audioStream = [];
+    window.AudioContextOrigin = window.AudioContext || window.webkitAudioContext;
+    window.AudioContext = function () {
+      const ac = new window.AudioContextOrigin();
+      const dest = ac.createMediaStreamDestination();
+      const baseMerge = ac.createGain();
+
+      window.globalGain = ac.createGain();
+      window.globalGain.gain.value = 1;
+      window.globalGain.connect(ac.destination);
+
+      // Intercept connect() so that all nodes go through globalGain at the end
+      const originalConnect = AudioNode.prototype.connect;
+      AudioNode.prototype.connect = function (destination, ...args) {
+        if (destination === ac.destination) {
+          // Instead of connecting directly to destination, go through globalGain
+          return originalConnect.call(this, window.globalGain, ...args);
+        }
+        return originalConnect.call(this, destination, ...args);
+      };
+      return ac;
+    };
+  </script>
+
+  <script>
+    // Override alert behavior
+    window.alert = function (message) {
+      console.error(message);
+    }
+  </script>
+
+  <script>
+    function sendParentMessage(event, data) {
+      <!--window.top.postMessage({ event: event, message: data }, 'https://play.unity.com');-->
+      window.top.postMessage({ event: event, message: data }, '*');
+    }
+  </script>
+
+  <script>
+    async function loadScript(url) {
+      return new Promise((resolve, reject) => {
+        const dynamicScriptElement = document.createElement("script");
+        dynamicScriptElement.src = url;
+        document.body.appendChild(dynamicScriptElement);
+
+        dynamicScriptElement.onload = () => {
+          resolve();
+        };
+
+        dynamicScriptElement.onerror = (error) => {
+          reject(error);
+        }
+      });
+    }
+  </script>
+
+  <script>
+    function startRecordingCanvas() {
+      window.recordedBlobs = [];
+      const availableRecordingOptions = ['video/webm;codecs=h264', 'video/webm;codecs=vp8,opus', 'video/webm'];
+      let recordingOptionIndex = 0;
+
+      while (availableRecordingOptions[recordingOptionIndex] && !MediaRecorder.isTypeSupported(availableRecordingOptions[recordingOptionIndex])) {
+        recordingOptionIndex++;
+      }
+
+      let recordingOption = availableRecordingOptions[recordingOptionIndex];
+
+      if (!recordingOption) {
+        console.error('This browser does not support recording via any support encoder');
+      }
+
+      window.mediaRecorder = new MediaRecorder(canvas.captureStream(), { mimeType: recordingOption });
+
+      mediaRecorder.onstop = () => {
+        onRecordingCompleted(window.recordedBlobs);
+      };
+
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data && event.data.size > 0) {
+          recordedBlobs.push(event.data);
+        }
+      };
+
+      mediaRecorder.start(10);
+    }
+
+    function onRecordingCompleted(blobs) {
+      sendParentMessage('recording.ready', { recordingBlobs: blobs });
+    }
+
+    function stopRecordingCanvas() {
+      mediaRecorder.stop();
+    }
+  </script>
+
+  <script>
+    // Patch canvas requestPointerLock
+    canvas._requestPointerLock = canvas.requestPointerLock;
+    canvas.requestPointerLock = async () => {
+      try {
+        return await canvas._requestPointerLock({
+          unadjustedMovement: true,
+        });
+      } catch (e) { /* swallow pointer lock errors */ }
+    };
+
+    if (navigator && /iPhone|iPad|iPod|Android/i.test(navigator.userAgent)) {
+      const meta = document.createElement('meta');
+      meta.name = 'viewport';
+      meta.content = 'width=device-width, height=device-height, initial-scale=1.0, user-scalable=no, shrink-to-fit=yes';
+      document.getElementsByTagName('head')[0].appendChild(meta);
+      container.className = "unity-mobile";
+      canvas.className = "unity-mobile";
+    } else {
+      canvas.style.width = "960px";
+      canvas.style.height = "600px";
+    }
+
+    let gameInstance;
+
+    window.addEventListener(
+      'message',
+      ({ data, origin }) => {
+        if (origin !== 'https://play.unity.com') {
+          return;
+        }
+
+        if (!gameInstance) {
+          return;
+        }
+
+        const { event, message } = data;
+
+        switch (event) {
+          case 'mute.disable':
+            if (window.globalGain && window.globalGain.gain) {
+              window.globalGain.gain.value = 1;
+            }
+            break;
+          case 'mute.enable':
+            if (window.globalGain && window.globalGain.gain) {
+              window.globalGain.gain.value = 0;
+            }
+            break;
+          case 'fullscreen.enable':
+            if (gameInstance) gameInstance.SetFullscreen(true);
+            break;
+          case 'fullscreen.disable':
+            if (gameInstance) gameInstance.SetFullscreen(false);
+            break;
+          case 'recording.start':
+            startRecordingCanvas();
+            break;
+          case 'recording.stop':
+            stopRecordingCanvas();
+            break;
+        }
+      }
+    );
+
+    const bundleFormat = "3"
+
+    const legacyGameProperties = {
+      productVersion: "1.0",
+      graphicsAPI: ["WebGL 1.0"],
+      webglContextAttributes: { preserveDrawingBuffer: false },
+      splashScreenStyle: "Dark",
+      backgroundColor: "#231F20",
+      developmentBuild: false,
+      multithreading: false,
+      unityVersion: "2019.3.15f1",
+      Module: { splashScreenStyle: "Dark", preRun: [] }
+    };
+
+    let config;
+    let loaderUrl;
+    let configBlobUrl;
+    let encodedConfig;
+    let configBlob;
+
+    switch (bundleFormat) {
+      case "1":
+        loaderUrl = ""
+
+        config = {
+          dataUrl: "https://cdn.play.unity.com/games/1797942a-d436-4284-a084-e6f9f88fd7b7/016740e0-9c3f-48d9-8691-fd68795bae33/game.data.gz?GoogleAccessId=unity-play-prd-api-sa%40unity-play-web-site-prd.iam.gserviceaccount.com&Expires=1793060150&Signature=GdYXtD%2Bwvup5Xz11VENB0NXA7d8cbF0O9PoYLcgKAZjJvqu2xQ8j3LLd1ZDhUD0o%2F4b4AilvqBfyS7PFNtbxiq1MbP%2BJHBLDmfjcLTwp%2FkS%2FYFqTGBNbOPRySg%2FdnbgldvSe4jn3gdIZ874EZjw1k7K75dwDenn1eAWwAmKG%2BIuI8%2FSJpX9oAUyDcw3VwuBssYr%2BkOokaqqk%2B590HqGi7BNLunq2j57mghrVcMR3k2L%2BWXOR6MUtJO%2B9RVvQzJMo3EoCuJvps0wpfFpaeAxoMdQw2NxxIBTdShC7qNsAC6pDKJWkTnpJsmW8vjL5sqVFN0mYVMgM1wW2EACR0S2XJA%3D%3D",
+          wasmFrameworkUrl: "https://cdn.play.unity.com/games/1797942a-d436-4284-a084-e6f9f88fd7b7/016740e0-9c3f-48d9-8691-fd68795bae33/framework.js.gz?GoogleAccessId=unity-play-prd-api-sa%40unity-play-web-site-prd.iam.gserviceaccount.com&Expires=1793060150&Signature=OoUdC5iaxYhiX%2BHqd0gk%2BGPSvVI1RSW0e3lNElqTW5LH%2FzQjO17r8P7%2F55W9hnlmBiiBejgl1hhjyvHHFnyCIJjuj%2FOnG08nGW%2FesQ1p0Bq3R5BjytsgjX3xkQlQIrGOWKmrF7IFru7lrDvjVnwXuk1f4cM%2BVMFvqevwbOadLMg6GhVhs2%2BrBMPBrq2xzHtAZADiSfJH8l14M9cdYF7Va8v8071UnK%2FTPkbI1s4rHHdwOYS3DBTXhI0sAghwI0sWesTkQolENXwqTUlAxt718qt7Hi8DDvyuIIWn%2BUJ4E0J46vW316RLZcmC77WcKbh9Al3I%2FJwktmn5UQnokQVEtQ%3D%3D",
+          asmCodeUrl: "",
+          asmMemoryUrl: "",
+          asmFrameworkUrl: "",
+          streamingAssetsUrl: "https://play-prod.struckd.com/api/v1/games/game/1797942a-d436-4284-a084-e6f9f88fd7b7/build/016740e0-9c3f-48d9-8691-fd68795bae33/streaming",
+          companyName: "play.unity.com",
+          productName: "Unity Play Project",
+          ...legacyGameProperties
+        };
+
+        encodedConfig = JSON.stringify(config);
+        configBlob = new Blob([encodedConfig], { type: "application/json" });
+        configBlobUrl = URL.createObjectURL(configBlob);
+        break;
+      case "2":
+        loaderUrl = ""
+
+        config = {
+          dataUrl: "https://cdn.play.unity.com/games/1797942a-d436-4284-a084-e6f9f88fd7b7/016740e0-9c3f-48d9-8691-fd68795bae33/game.data.gz?GoogleAccessId=unity-play-prd-api-sa%40unity-play-web-site-prd.iam.gserviceaccount.com&Expires=1793060150&Signature=GdYXtD%2Bwvup5Xz11VENB0NXA7d8cbF0O9PoYLcgKAZjJvqu2xQ8j3LLd1ZDhUD0o%2F4b4AilvqBfyS7PFNtbxiq1MbP%2BJHBLDmfjcLTwp%2FkS%2FYFqTGBNbOPRySg%2FdnbgldvSe4jn3gdIZ874EZjw1k7K75dwDenn1eAWwAmKG%2BIuI8%2FSJpX9oAUyDcw3VwuBssYr%2BkOokaqqk%2B590HqGi7BNLunq2j57mghrVcMR3k2L%2BWXOR6MUtJO%2B9RVvQzJMo3EoCuJvps0wpfFpaeAxoMdQw2NxxIBTdShC7qNsAC6pDKJWkTnpJsmW8vjL5sqVFN0mYVMgM1wW2EACR0S2XJA%3D%3D",
+          wasmFrameworkUrl: "https://cdn.play.unity.com/games/1797942a-d436-4284-a084-e6f9f88fd7b7/016740e0-9c3f-48d9-8691-fd68795bae33/framework.js.gz?GoogleAccessId=unity-play-prd-api-sa%40unity-play-web-site-prd.iam.gserviceaccount.com&Expires=1793060150&Signature=OoUdC5iaxYhiX%2BHqd0gk%2BGPSvVI1RSW0e3lNElqTW5LH%2FzQjO17r8P7%2F55W9hnlmBiiBejgl1hhjyvHHFnyCIJjuj%2FOnG08nGW%2FesQ1p0Bq3R5BjytsgjX3xkQlQIrGOWKmrF7IFru7lrDvjVnwXuk1f4cM%2BVMFvqevwbOadLMg6GhVhs2%2BrBMPBrq2xzHtAZADiSfJH8l14M9cdYF7Va8v8071UnK%2FTPkbI1s4rHHdwOYS3DBTXhI0sAghwI0sWesTkQolENXwqTUlAxt718qt7Hi8DDvyuIIWn%2BUJ4E0J46vW316RLZcmC77WcKbh9Al3I%2FJwktmn5UQnokQVEtQ%3D%3D",
+          wasmCodeUrl: "https://cdn.play.unity.com/games/1797942a-d436-4284-a084-e6f9f88fd7b7/016740e0-9c3f-48d9-8691-fd68795bae33/game.wasm.gz?GoogleAccessId=unity-play-prd-api-sa%40unity-play-web-site-prd.iam.gserviceaccount.com&Expires=1793060150&Signature=kt9uGdeSxIYo8dypOeCpNAUcf1NyOrErTet9EGrGyGxSZo9IMRUYL19wG3%2BYOzemQ6uNOxp%2FC%2FnaKuqLVBSUP11JxjpJAGAoF7ZcUChlnmy1zp1qtc%2Bj8EXtNpdoRq0RHW6JyBAI4VcH4E0hwj7ih5re38vd8XBPHH12RRqjd4IHaHAGvaow%2FMXEgCvwY7EgZoOgSIfm226LIi3RcKHTnrXeBHML86ruqVSRV2JuBs1Y9p0jF03necL9IS%2BAIyXuB7lqiit3ODs8nJz3jNQdc5FVQiad4FxvEDiNv2frrTVRwydt7e6thvnaA0NHOr4T82hFx9AROr8AAwE066%2BXHA%3D%3D",
+          streamingAssetsUrl: "https://play-prod.struckd.com/api/v1/games/game/1797942a-d436-4284-a084-e6f9f88fd7b7/build/016740e0-9c3f-48d9-8691-fd68795bae33/streaming",
+          companyName: "play.unity.com",
+          productName: "Unity Play Project",
+          ...legacyGameProperties
+        };
+
+        encodedConfig = JSON.stringify(config);
+        configBlob = new Blob([encodedConfig], { type: "application/json" });
+        configBlobUrl = URL.createObjectURL(configBlob);
+        break;
+      case "3":
+      default:
+        loaderUrl = "https://cdn.play.unity.com/games/1797942a-d436-4284-a084-e6f9f88fd7b7/016740e0-9c3f-48d9-8691-fd68795bae33/loader.js?GoogleAccessId=unity-play-prd-api-sa%40unity-play-web-site-prd.iam.gserviceaccount.com&Expires=1793060151&Signature=efNZHDVVBd0mCp%2BW1EEjABYcSygwqGgOVDL3zVqIiYhx9bbqplFbkwjmTMsox%2Fgh85y3H6DN%2FMnvI7D3QCBJMF47ojdfKI%2BbL4vb98X%2BKvjQtBdHD4xKMsE9Wx6Y2UaEkHdf91k9w1O76kPDgPaDklXzFoss225fJe9ZHxq6IzUL3UKMBAJEMJFHpTe0N%2B%2BpCtugQoTVLlyOaM0%2BakmklwPYkR0LuQBzm8melL9HSknTY3znvsLgcYudlHDJB%2BGCu7%2FQyGPmPumSe%2FE4tFzVtVZGs3BqnXHEMTF5mBglSWf22lXGiYZOE%2FPkCVUXtsoxa1NHbBz3yfPLughXeO0S%2BQ%3D%3D";
+
+        config = {
+          dataUrl: "https://cdn.play.unity.com/games/1797942a-d436-4284-a084-e6f9f88fd7b7/016740e0-9c3f-48d9-8691-fd68795bae33/game.data.gz?GoogleAccessId=unity-play-prd-api-sa%40unity-play-web-site-prd.iam.gserviceaccount.com&Expires=1793060150&Signature=GdYXtD%2Bwvup5Xz11VENB0NXA7d8cbF0O9PoYLcgKAZjJvqu2xQ8j3LLd1ZDhUD0o%2F4b4AilvqBfyS7PFNtbxiq1MbP%2BJHBLDmfjcLTwp%2FkS%2FYFqTGBNbOPRySg%2FdnbgldvSe4jn3gdIZ874EZjw1k7K75dwDenn1eAWwAmKG%2BIuI8%2FSJpX9oAUyDcw3VwuBssYr%2BkOokaqqk%2B590HqGi7BNLunq2j57mghrVcMR3k2L%2BWXOR6MUtJO%2B9RVvQzJMo3EoCuJvps0wpfFpaeAxoMdQw2NxxIBTdShC7qNsAC6pDKJWkTnpJsmW8vjL5sqVFN0mYVMgM1wW2EACR0S2XJA%3D%3D",
+          frameworkUrl: "https://cdn.play.unity.com/games/1797942a-d436-4284-a084-e6f9f88fd7b7/016740e0-9c3f-48d9-8691-fd68795bae33/framework.js.gz?GoogleAccessId=unity-play-prd-api-sa%40unity-play-web-site-prd.iam.gserviceaccount.com&Expires=1793060150&Signature=OoUdC5iaxYhiX%2BHqd0gk%2BGPSvVI1RSW0e3lNElqTW5LH%2FzQjO17r8P7%2F55W9hnlmBiiBejgl1hhjyvHHFnyCIJjuj%2FOnG08nGW%2FesQ1p0Bq3R5BjytsgjX3xkQlQIrGOWKmrF7IFru7lrDvjVnwXuk1f4cM%2BVMFvqevwbOadLMg6GhVhs2%2BrBMPBrq2xzHtAZADiSfJH8l14M9cdYF7Va8v8071UnK%2FTPkbI1s4rHHdwOYS3DBTXhI0sAghwI0sWesTkQolENXwqTUlAxt718qt7Hi8DDvyuIIWn%2BUJ4E0J46vW316RLZcmC77WcKbh9Al3I%2FJwktmn5UQnokQVEtQ%3D%3D",
+          codeUrl: "https://cdn.play.unity.com/games/1797942a-d436-4284-a084-e6f9f88fd7b7/016740e0-9c3f-48d9-8691-fd68795bae33/game.wasm.gz?GoogleAccessId=unity-play-prd-api-sa%40unity-play-web-site-prd.iam.gserviceaccount.com&Expires=1793060150&Signature=kt9uGdeSxIYo8dypOeCpNAUcf1NyOrErTet9EGrGyGxSZo9IMRUYL19wG3%2BYOzemQ6uNOxp%2FC%2FnaKuqLVBSUP11JxjpJAGAoF7ZcUChlnmy1zp1qtc%2Bj8EXtNpdoRq0RHW6JyBAI4VcH4E0hwj7ih5re38vd8XBPHH12RRqjd4IHaHAGvaow%2FMXEgCvwY7EgZoOgSIfm226LIi3RcKHTnrXeBHML86ruqVSRV2JuBs1Y9p0jF03necL9IS%2BAIyXuB7lqiit3ODs8nJz3jNQdc5FVQiad4FxvEDiNv2frrTVRwydt7e6thvnaA0NHOr4T82hFx9AROr8AAwE066%2BXHA%3D%3D",
+          streamingAssetsUrl: "https://play-prod.struckd.com/api/v1/games/game/1797942a-d436-4284-a084-e6f9f88fd7b7/build/016740e0-9c3f-48d9-8691-fd68795bae33/streaming",
+          companyName: "play.unity.com",
+          productName: "Unity Play Project",
+          productVersion: "1.0",
+        };
+        break;
+    }
+
+    async function loadFeatures() {
+      const availableFeatures = "".split(',').map(x => x.trim());
+
+      if (availableFeatures.includes('webgpu')) {
+        const webGPUCacheLoaderUrl = "";
+        const webGPUCacheDataUrl = "";
+
+        console.log(`Loading WebGPU cache data...`);
+        await loadScript(webGPUCacheDataUrl);
+
+        console.log(`Loading WebGPU cache loader...`);
+        await loadScript(webGPUCacheLoaderUrl);
+      }
+
+      if (availableFeatures.includes('web-worker')) {
+        config['workerUrl'] = "https://play-prod.struckd.com/api/v1/games/game/1797942a-d436-4284-a084-e6f9f88fd7b7/build/016740e0-9c3f-48d9-8691-fd68795bae33/web-worker"
+      }
+
+      if (availableFeatures.includes('service-worker')) {
+        // if ("serviceWorker" in navigator) {
+        //   navigator.serviceWorker.register("https://play-prod.struckd.com/api/v1/games/game/1797942a-d436-4284-a084-e6f9f88fd7b7/build/016740e0-9c3f-48d9-8691-fd68795bae33/service-worker");
+        // }
+      }
+    }
+
+    function instantiateUsingUnityLoader() {
+      console.log("Instantiating using UnityLoader...");
+      const res = UnityLoader.instantiate("unity-container", configBlobUrl, {
+        onProgress: (instance, progress) => {
+          gameInstance = instance;
+          sendParentMessage('progress', { progress: progress });
+
+          // This loader doesn't have an event for completion as far as I can tell, but it does finish the progress load on 0.9
+          if (progress === 0.9) {
+            sendParentMessage('ready', {});
+          }
+        },
+        Module: {
+          resolveBuildUrl: (e) => {
+            return e;
+          },
+          locateFile: (e) => {
+            if (e === 'build.wasm') {
+              return config['wasmCodeUrl'];
+            }
+
+            return e;
+          }
+        }
+      });
+    };
+
+    function instantiateUsingCreateUnityInstance() {
+      console.log("Instantiating using createUnityInstance...");
+
+      createUnityInstance(canvas, config, (progress) => {
+        sendParentMessage('progress', { progress: progress });
+      }).then(instance => {
+        gameInstance = instance;
+        sendParentMessage('ready', {});
+      }).catch(error => {
+        console.error(error);
+        sendParentMessage('error', { error: error });
+      });
+    }
+
+    function patchUnityLoader(loaderSource) {
+      // Older versions of the loader will only identify and respect compression if the file ends in .unityweb
+      // Because this format has changed, we need to patch the old loaders to always respect compression
+
+      if (loaderSource.indexOf('e.wasmCodeUrl.endsWith(".unityweb")') !== -1) {
+        return loaderSource.replace('e.wasmCodeUrl.endsWith(".unityweb")', '(e.wasmCodeUrl.endsWith(".unityweb") || true)');
+      }
+      return loaderSource;
+    }
+
+    async function getPatchedUnityLoaderUrl() {
+      const loaderSourceResponse = await fetch(loaderUrl);
+      const loaderSource = await loaderSourceResponse.text();
+      const patchedLoaderSource = patchUnityLoader(loaderSource);
+      const patchedLoaderBlob = new Blob([patchedLoaderSource], { type: "application/javascript" });
+      const patchedLoaderUrl = URL.createObjectURL(patchedLoaderBlob);
+
+      return patchedLoaderUrl;
+    }
+
+    async function instantiateUnityLoader() {
+      const patchedUnityLoaderUrl = await getPatchedUnityLoaderUrl();
+
+      await loadScript(patchedUnityLoaderUrl);
+
+      switch (bundleFormat) {
+        case "1":
+        case "2":
+          instantiateUsingUnityLoader();
+          break;
+        case "3":
+        default:
+          instantiateUsingCreateUnityInstance();
+          break;
+      }
+    }
+
+    addEventListener("DOMContentLoaded", () => {
+      loadFeatures().then(() => {
+        console.log(`Initializing Unity loader...`);
+        instantiateUnityLoader();
+      }).catch(e => {
+        console.error(`Failed to load features - ${e}`);
+      });
+    });
+  </script>
+</body>
+
+</html>
